@@ -296,3 +296,6 @@ def risk_check(request: RiskRequest):
             "It does not include individual patient data or official national health alerts."
         ),
     }
+@app.get("/")
+def root():
+    return {"message": "CEE Respiratory Risk API is running"}
