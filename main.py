@@ -165,9 +165,9 @@ def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, A
     if min_temp is not None and min_temp <= 0:
         score += 2
         drivers.append("cold")
-    if max_humidity is not None and max_humidity >= 85:
-        score += 1
-        drivers.append("high humidity")
+   humidity_flag = False
+if max_humidity is not None and max_humidity >= 85:
+    humidity_flag = True
     if max_precip is not None and max_precip >= 10:
         score += 1
         drivers.append("heavy rain / storm conditions")
@@ -176,22 +176,30 @@ def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, A
         drivers.append("strong wind")
 
     # Synergies
-    if "heat" in drivers and "ozone" in drivers:
-        score += 2
-        drivers.append("heat + ozone synergy")
+   if "heat" in drivers and "ozone" in drivers:
+    score += 3
+    drivers.append("heat + ozone synergy")
 
-    if "pollen" in drivers and "heavy rain / storm conditions" in drivers:
-        score += 3
-        drivers.append("pollen + storm synergy")
+if "PM2.5" in drivers and "ozone" in drivers:
+    score += 3
+    drivers.append("PM + ozone synergy")
 
-    if score >= 8:
-        level = "critical"
-    elif score >= 5:
-        level = "high"
-    elif score >= 3:
-        level = "moderate"
-    else:
-        level = "low"
+if "pollen" in drivers and "heavy rain / storm conditions" in drivers:
+    score += 3
+    drivers.append("pollen + storm synergy")
+
+if humidity_flag and len(drivers) >= 2:
+    score += 1
+    drivers.append("high humidity (modifier)")
+
+  if score >= 9:
+    level = "critical"
+elif score >= 6:
+    level = "high"
+elif score >= 4:
+    level = "moderate"
+else:
+    level = "low"
 
     return {
         "score": score,
