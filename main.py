@@ -14,6 +14,10 @@ class RiskRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
+@app.head("/health")
+def health_head():
+    return
+
 @app.post("/risk-check")
 def risk_check(request: RiskRequest):
     return {
