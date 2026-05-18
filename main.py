@@ -45,6 +45,11 @@ class RiskRequest(BaseModel):
     min_alert_level: str = "moderate"
 
 
+@app.get("/")
+def root():
+    return {"message": "CEE Respiratory Risk API is running"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -79,6 +84,7 @@ def fetch_forecast(lat: float, lon: float, hours: int) -> Dict[str, Any]:
         "forecast_days": 3,
         "timezone": "auto",
     }
+
     response = requests.get(url, params=params, timeout=20)
     response.raise_for_status()
     data = response.json()
@@ -105,11 +111,89 @@ def fetch_air_quality(lat: float, lon: float, hours: int) -> Dict[str, Any]:
         "forecast_days": 3,
         "timezone": "auto",
     }
+
     response = requests.get(url, params=params, timeout=20)
     response.raise_for_status()
     data = response.json()
     hourly = data.get("hourly", {})
     return {k: v[:hours] for k, v in hourly.items()}
+
+
+def current_season() -> str:
+    month = datetime.utcnow().month
+
+    if month in [3, 4]:
+        return "early_tree_pollen"
+    if month in [5, 6, 7]:
+        return "grass_pollen"
+    if month in [8, 9, 10]:
+        return "ragweed_mugwort_pollen"
+    if month in [11, 12, 1, 2]:
+        return "winter_pollution"
+
+    return "unknown"
+
+
+def calculate_pollen_score(air: Dict[str, Any]) -> Dict[str, Any]:
+    season = current_season()
+
+    pollen_metrics = {
+        "grass_pollen": max_value(air.get("grass_pollen", [])),
+        "birch_pollen": max_value(air.get("birch_pollen", [])),
+        "alder_pollen": max_value(air.get("alder_pollen", [])),
+        "mugwort_pollen": max_value(air.get("mugwort_pollen", [])),
+        "ragweed_pollen": max_value(air.get("ragweed_pollen", [])),
+    }
+
+    active_values = [
+        value for value in pollen_metrics.values()
+        if isinstance(value, (int, float))
+    ]
+
+    max_any_pollen = max(active_values) if active_values else None
+
+    score = 0
+    drivers = []
+
+    if season == "early_tree_pollen":
+        if pollen_metrics["birch_pollen"] is not None and pollen_metrics["birch_pollen"] >= 50:
+            score += 3
+            drivers.append("birch pollen")
+        if pollen_metrics["alder_pollen"] is not None and pollen_metrics["alder_pollen"] >= 50:
+            score += 2
+            drivers.append("alder pollen")
+
+    elif season == "grass_pollen":
+        if pollen_metrics["grass_pollen"] is not None and pollen_metrics["grass_pollen"] >= 30:
+            score += 3
+            drivers.append("grass pollen")
+        if pollen_metrics["birch_pollen"] is not None and pollen_metrics["birch_pollen"] >= 70:
+            score += 1
+            drivers.append("residual tree pollen")
+
+    elif season == "ragweed_mugwort_pollen":
+        if pollen_metrics["ragweed_pollen"] is not None and pollen_metrics["ragweed_pollen"] >= 20:
+            score += 4
+            drivers.append("ragweed pollen")
+        if pollen_metrics["mugwort_pollen"] is not None and pollen_metrics["mugwort_pollen"] >= 20:
+            score += 3
+            drivers.append("mugwort pollen")
+        if pollen_metrics["grass_pollen"] is not None and pollen_metrics["grass_pollen"] >= 40:
+            score += 1
+            drivers.append("late grass pollen")
+
+    else:
+        if max_any_pollen is not None and max_any_pollen >= 80:
+            score += 1
+            drivers.append("out-of-season pollen signal")
+
+    return {
+        "score": score,
+        "drivers": drivers,
+        "season": season,
+        "metrics": pollen_metrics,
+        "max_any_pollen": max_any_pollen,
+    }
 
 
 def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, Any]:
@@ -124,27 +208,12 @@ def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, A
     max_no2 = max_value(air.get("nitrogen_dioxide", []))
     max_ozone = max_value(air.get("ozone", []))
 
-    pollen_values = []
-    for key in [
-        "grass_pollen",
-        "birch_pollen",
-        "alder_pollen",
-        "mugwort_pollen",
-        "ragweed_pollen",
-    ]:
-        pollen_values.extend(air.get(key, []))
-
-    max_pollen = max_value(pollen_values)
+    pollen = calculate_pollen_score(air)
 
     score = 0
     drivers = []
 
     # Air quality
-   # Require at least 2 meaningful drivers for moderate or higher
-core_drivers = [d for d in drivers if "humidity" not in d]
-
-if len(core_drivers) < 2 and score < 6:
-    level = "low"
     if max_pm25 is not None and max_pm25 >= 25:
         score += 3
         drivers.append("PM2.5")
@@ -154,14 +223,13 @@ if len(core_drivers) < 2 and score < 6:
     if max_no2 is not None and max_no2 >= 40:
         score += 2
         drivers.append("NO2")
-   if max_ozone is not None and max_ozone >= 120:
-    score += 2
-    drivers.append("ozone")
-
-    # Pollen
-    if max_pollen is not None and max_pollen >= 50:
+    if max_ozone is not None and max_ozone >= 120:
         score += 2
-        drivers.append("pollen")
+        drivers.append("ozone")
+
+    # Seasonally weighted pollen
+    score += pollen["score"]
+    drivers.extend(pollen["drivers"])
 
     # Weather stress
     if max_temp is not None and max_temp >= 32:
@@ -170,41 +238,57 @@ if len(core_drivers) < 2 and score < 6:
     if min_temp is not None and min_temp <= 0:
         score += 2
         drivers.append("cold")
-   humidity_flag = False
-if max_humidity is not None and max_humidity >= 85:
-    humidity_flag = True
+
+    humidity_flag = False
+    if max_humidity is not None and max_humidity >= 85:
+        humidity_flag = True
+
     if max_precip is not None and max_precip >= 10:
         score += 1
         drivers.append("heavy rain / storm conditions")
+
     if max_gust is not None and max_gust >= 60:
         score += 1
         drivers.append("strong wind")
 
     # Synergies
-   if "heat" in drivers and "ozone" in drivers:
-    score += 3
-    drivers.append("heat + ozone synergy")
+    if "heat" in drivers and "ozone" in drivers:
+        score += 3
+        drivers.append("heat + ozone synergy")
 
-if "PM2.5" in drivers and "ozone" in drivers:
-    score += 3
-    drivers.append("PM + ozone synergy")
+    if "PM2.5" in drivers and "ozone" in drivers:
+        score += 3
+        drivers.append("PM + ozone synergy")
 
-if "pollen" in drivers and "heavy rain / storm conditions" in drivers:
-    score += 3
-    drivers.append("pollen + storm synergy")
+    pollen_driver_present = any(
+        "pollen" in driver for driver in drivers
+    )
 
-if humidity_flag and len(drivers) >= 2:
-    score += 1
-    drivers.append("humidity (secondary)")
+    if pollen_driver_present and "heavy rain / storm conditions" in drivers:
+        score += 3
+        drivers.append("pollen + storm synergy")
 
-  if score >= 9:
-    level = "critical"
-elif score >= 6:
-    level = "high"
-elif score >= 4:
-    level = "moderate"
-else:
-    level = "low"
+    if humidity_flag and len(drivers) >= 2:
+        score += 1
+        drivers.append("humidity (secondary)")
+
+    core_drivers = [
+        driver for driver in drivers
+        if "humidity" not in driver
+    ]
+
+    if score >= 9:
+        level = "critical"
+    elif score >= 6:
+        level = "high"
+    elif score >= 4:
+        level = "moderate"
+    else:
+        level = "low"
+
+    # Prevent single-factor alerts below high severity
+    if len(core_drivers) < 2 and score < 6:
+        level = "low"
 
     return {
         "score": score,
@@ -220,7 +304,9 @@ else:
             "max_pm10": max_pm10,
             "max_no2": max_no2,
             "max_ozone": max_ozone,
-            "max_pollen": max_pollen,
+            "pollen_season": pollen["season"],
+            "max_any_pollen": pollen["max_any_pollen"],
+            "pollen_detail": pollen["metrics"],
         },
     }
 
@@ -240,7 +326,8 @@ def risk_check(request: RiskRequest):
     alerts = []
 
     selected_locations = [
-        loc for loc in LOCATIONS if loc["country"] in request.countries
+        loc for loc in LOCATIONS
+        if loc["country"] in request.countries
     ]
 
     for loc in selected_locations:
@@ -272,9 +359,10 @@ def risk_check(request: RiskRequest):
                             "burden and exacerbation risk in asthma and COPD populations."
                         ),
                         "recommended_action": (
-                            "Review local respiratory risk communication, consider "
-                            "HCP/patient awareness messaging, and monitor official "
-                            "health and weather warnings."
+                            "Monitor local respiratory risk signals, consider "
+                            "non-promotional HCP/patient awareness messaging where "
+                            "appropriate, and follow official weather and public "
+                            "health warnings."
                         ),
                     }
                 )
@@ -306,9 +394,7 @@ def risk_check(request: RiskRequest):
         ],
         "limitations": (
             "This is an automated screening tool and not medical advice. "
-            "It does not include individual patient data or official national health alerts."
+            "It does not include individual patient data or official national "
+            "health alert systems."
         ),
     }
-@app.get("/")
-def root():
-    return {"message": "CEE Respiratory Risk API is running"}
