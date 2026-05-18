@@ -140,6 +140,11 @@ def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, A
     drivers = []
 
     # Air quality
+   # Require at least 2 meaningful drivers for moderate or higher
+core_drivers = [d for d in drivers if "humidity" not in d]
+
+if len(core_drivers) < 2 and score < 6:
+    level = "low"
     if max_pm25 is not None and max_pm25 >= 25:
         score += 3
         drivers.append("PM2.5")
@@ -149,9 +154,9 @@ def calculate_risk(forecast: Dict[str, Any], air: Dict[str, Any]) -> Dict[str, A
     if max_no2 is not None and max_no2 >= 40:
         score += 2
         drivers.append("NO2")
-    if max_ozone is not None and max_ozone >= 100:
-        score += 3
-        drivers.append("ozone")
+   if max_ozone is not None and max_ozone >= 120:
+    score += 2
+    drivers.append("ozone")
 
     # Pollen
     if max_pollen is not None and max_pollen >= 50:
@@ -190,7 +195,7 @@ if "pollen" in drivers and "heavy rain / storm conditions" in drivers:
 
 if humidity_flag and len(drivers) >= 2:
     score += 1
-    drivers.append("high humidity (modifier)")
+    drivers.append("humidity (secondary)")
 
   if score >= 9:
     level = "critical"
